@@ -20,6 +20,8 @@ let subBatchResults = Immutable.List();
 let dispatchSubTimeout = null;
 let subBatchTime = 500;
 
+let currentMarket = null;
+
 function clearBatchTimeouts() {
     clearTimeout(dispatchCancelTimeout);
     clearTimeout(dispatchSubTimeout);
@@ -40,6 +42,7 @@ class MarketsActions {
 
     getMarketStats(base, quote) {
         return (dispatch) => {
+            if (base === quote) return dispatch({});
             let market = quote.get("id") + "_" + base.get("id");
             let marketName = quote.get("symbol") + "_" + base.get("symbol");
             let now = new Date();
@@ -63,13 +66,16 @@ class MarketsActions {
                     lastFetched: new Date()
                 };
                 Promise.all([
-                    Apis.instance().history_api().exec("get_market_history", [
-                        base.get("id"), quote.get("id"), 3600, startDateShort.toISOString().slice(0, -5), endDate.toISOString().slice(0, -5)
-                    ]),
-                    Apis.instance().history_api().exec("get_fill_order_history", [base.get("id"), quote.get("id"), 1])
+                    // Apis.instance().history_api().exec("get_market_history", [
+                    //     base.get("id"), quote.get("id"), 3600, startDateShort.toISOString().slice(0, -5), endDate.toISOString().slice(0, -5)
+                    // ]),
+                    // Apis.instance().history_api().exec("get_fill_order_history", [base.get("id"), quote.get("id"), 1]),
+                    Apis.instance().db_api().exec("get_ticker", [base.get("id"), quote.get("id")])
                 ])
                 .then(result => {
-                    dispatch({history: result[0], last: result[1], market: marketName, base, quote});
+                    dispatch({ticker: result[0], market: marketName, base, quote});
+                }).catch(err => {
+                    console.log("getMarketStats error:", err);
                 });
             }
         };
@@ -82,6 +88,7 @@ class MarketsActions {
     subscribeMarket(base, quote, bucketSize) {
         clearBatchTimeouts();
         let subID = quote.get("id") + "_" + base.get("id");
+        currentMarket = base.get("id") + "_" + quote.get("id");;
 
         let {isMarketAsset, marketAsset, inverted} = marketUtils.isMarketAsset(quote, base);
 
@@ -89,7 +96,14 @@ class MarketsActions {
         // let lastLimitOrder = null;
         return (dispatch) => {
 
-            let subscription = (subResult) => {
+            let subscription = (marketId, subResult) => {
+                /*
+                ** When switching markets rapidly we might receive sub notifications
+                ** from the previous markets, in that case disregard them
+                */
+                if (marketId !== currentMarket) {
+                    return;
+                }
                 /* In the case of many market notifications arriving at the same time,
                 * we queue them in a batch here and dispatch them all at once at a frequency
                 * defined by "subBatchTime"
@@ -167,29 +181,27 @@ class MarketsActions {
                             ]),
                             !hasFill ? null : Apis.instance().history_api().exec("get_fill_order_history", [base.get("id"), quote.get("id"), 200]),
                             !hasFill ? null : Apis.instance().history_api().exec("get_market_history", [
-                                base.get("id"), quote.get("id"), 3600, startDateShort.toISOString().slice(0, -5), endDate.toISOString().slice(0, -5)
-                            ]),
-                            !hasFill ? null : Apis.instance().history_api().exec("get_market_history", [
                                 base.get("id"), quote.get("id"), bucketSize, startDate2.toISOString().slice(0, -5) , startDate.toISOString().slice(0, -5)
                             ]),
                             !hasFill ? null : Apis.instance().history_api().exec("get_market_history", [
                                 base.get("id"), quote.get("id"), bucketSize, startDate3.toISOString().slice(0, -5) , startDate2.toISOString().slice(0, -5)
-                            ])
+                            ]),
+                            Apis.instance().db_api().exec("get_ticker", [base.get("id"), quote.get("id")])
                         ])
                         .then(results => {
-                            const data1 = results[6] || [];
-                            const data2 = results[7] || [];
+                            const data1 = results[5] || [];
+                            const data2 = results[6] || [];
                             dispatch({
                                 limits: results[0],
                                 calls: !onlyLimitOrder && results[1],
                                 settles: !onlyLimitOrder && results[2],
                                 price: hasFill && data1.concat(data2.concat(results[3])),
                                 history: hasFill && results[4],
-                                recent: hasFill && results[5],
                                 market: subID,
                                 base: base,
                                 quote: quote,
-                                inverted: inverted
+                                inverted: inverted,
+                                ticker: results[7]
                             });
                         }).catch((error) => {
                             console.log("Error in MarketsActions.subscribeMarket: ", error);
@@ -229,7 +241,7 @@ class MarketsActions {
                 if (__DEV__) console.time("Fetch market data");
                 return Promise.all([
                     Apis.instance().db_api().exec("subscribe_to_market", [
-                        subscription, base.get("id"), quote.get("id")
+                        subscription.bind(this, base.get("id") + "_" + quote.get("id")),  base.get("id"), quote.get("id")
                     ]),
                     Apis.instance().db_api().exec("get_limit_orders", [
                         base.get("id"), quote.get("id"), 300
@@ -242,18 +254,16 @@ class MarketsActions {
                     Apis.instance().history_api().exec("get_market_history_buckets", []),
                     Apis.instance().history_api().exec("get_fill_order_history", [base.get("id"), quote.get("id"), 200]),
                     Apis.instance().history_api().exec("get_market_history", [
-                        base.get("id"), quote.get("id"), 3600, startDateShort.toISOString().slice(0, -5), endDate.toISOString().slice(0, -5)
-                    ]),
-                    Apis.instance().history_api().exec("get_market_history", [
                         base.get("id"), quote.get("id"), bucketSize, startDate2.toISOString().slice(0, -5) , startDate.toISOString().slice(0, -5)
                     ]),
                     Apis.instance().history_api().exec("get_market_history", [
                         base.get("id"), quote.get("id"), bucketSize, startDate3.toISOString().slice(0, -5) , startDate2.toISOString().slice(0, -5)
-                    ])
+                    ]),
+                    Apis.instance().db_api().exec("get_ticker", [base.get("id"), quote.get("id")])
                 ])
                 .then((results) => {
-                    const data1 = results[9] || [];
-                    const data2 = results[8] || [];
+                    const data1 = results[8] || [];
+                    const data2 = results[7] || [];
                     subs[subID] = subscription;
                     if (__DEV__) console.timeEnd("Fetch market data");
                     dispatch({
@@ -263,11 +273,11 @@ class MarketsActions {
                         price: data1.concat(data2.concat(results[4])),
                         buckets: results[5],
                         history: results[6],
-                        recent: results[7],
                         market: subID,
                         base: base,
                         quote: quote,
-                        inverted: inverted
+                        inverted: inverted,
+                        ticker: results[9]
                     });
                 }).catch((error) => {
                     console.log("Error in MarketsActions.subscribeMarket: ", error);
